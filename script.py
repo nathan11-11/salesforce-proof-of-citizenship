@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import xml.etree.ElementTree as ET
@@ -6,30 +7,84 @@ from urllib.parse import quote
 import requests
 
 DOWNLOAD_FOLDER = "Downloads"
+SOURCE_NAME = "USNA - Midshipman"
 
 # Optimized single SOQL query pulling directly from ContentVersion
 SOQL_QUERY = """
-SELECT 
-    ContentDocumentId, 
-    VersionData, 
-    FileExtension,
-    ContentDocument.Owner.FirstName, 
-    ContentDocument.Owner.LastName, 
-    ContentDocument.Owner.Contact.MIDS_Alpha__c 
-FROM ContentVersion 
-WHERE IsLatest = TRUE 
-  AND ContentDocument.Owner.Contact.RecordType.Name = 'Midshipmen' 
-  AND ContentDocument.Owner.Contact.AIS_Class_Year__c = '2030' 
-  AND ContentDocument.Owner.Contact.MIDS_status_code__c = '00'
-  AND ContentDocumentId IN (
-      SELECT ContentDocumentId 
-      FROM ContentDocumentLink 
-      WHERE LinkedEntity.Name = 'Proof of Citizenship Instructions'
-  )
+SELECT ContentDocumentId, VersionData, FileExtension,
+ContentDocument.Owner.FirstName, ContentDocument.Owner.LastName,
+ContentDocument.Owner.Contact.MIDS_Alpha__c, Owner.Contact.hed__Social_Security_Number__c,
+Owner.Contact.Formatted_Birthdate__c, Owner.MiddleName
+FROM ContentVersion
+WHERE IsLatest = TRUE
+AND ContentDocument.Owner.Contact.RecordType.Name = 'Midshipmen'
+AND ContentDocument.Owner.Contact.AIS_Class_Year__c = '2030'
+AND ContentDocument.Owner.Contact.MIDS_status_code__c = '00'
+AND ContentDocumentId IN (
+SELECT ContentDocumentId
+FROM ContentDocumentLink
+WHERE LinkedEntity.Name = 'Proof of Citizenship Instructions'
+LIMIT 10
+)
 """
 
 def xml_escape(v):
     return str(v).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace('"',"&quot;").replace("'","&apos;")
+
+
+def format_birth_date(value):
+    """Return a date in the IDSWS-required YYYYMMDD format when possible."""
+    if not value:
+        return None
+
+    digits = "".join(char for char in str(value) if char.isdigit())
+    if len(digits) != 8:
+        return str(value)
+
+    # Salesforce date fields are normally returned as YYYY-MM-DD.  Support the
+    # formatted MM/DD/YYYY value currently selected by the query as well.
+    if str(value).lstrip().startswith(("19", "20")):
+        return digits
+    return digits[4:] + digits[:4]
+
+
+def encode_pdf_document(file_extension, content):
+    """Return IDSWS's Base64 document value, or null for a non-PDF file."""
+    if str(file_extension).lower() != "pdf":
+        return None
+    return base64.b64encode(content).decode("ascii")
+
+
+def soap_fault_message(response):
+    """Extract a readable Salesforce SOAP fault without exposing credentials."""
+    try:
+        root = ET.fromstring(response.text)
+    except ET.ParseError:
+        return response.reason
+
+    for element in root.iter():
+        tag_name = element.tag.rsplit("}", 1)[-1]
+        if tag_name == "faultstring" and element.text:
+            return element.text.strip()
+    return response.reason
+
+
+def build_document_payload(content_owner, version_owner, document):
+    """Build the IDSWS sidecar metadata for one downloaded document."""
+    version_contact = version_owner.get("Contact") or {}
+
+    return {
+        "source_nm": SOURCE_NAME,
+        "pn_id": version_contact.get("hed__Social_Security_Number__c"),
+        "pn_id_typ_cd": "S",
+        "pn_lst_nm": content_owner.get("LastName"),
+        "pn_frst_nm": content_owner.get("FirstName"),
+        "pn_mid_nm": version_owner.get("MiddleName"),
+        "pn_brth_dt": format_birth_date(
+            version_contact.get("Formatted_Birthdate__c")
+        ),
+        "document": document,
+    }
 
 # Load configuration data
 with open("config.json") as f:
@@ -52,7 +107,10 @@ body = f"""<?xml version="1.0"?>
 
 print("Connecting...")
 r = requests.post(f"{login}/services/Soap/u/{api}", data=body.encode(), headers={"Content-Type":"text/xml; charset=UTF-8","SOAPAction":"login"})
-r.raise_for_status()
+if not r.ok:
+    raise RuntimeError(
+        f"Salesforce login failed (HTTP {r.status_code}): {soap_fault_message(r)}"
+    )
 
 # Parse authentication details
 root = ET.fromstring(r.text)
@@ -83,11 +141,12 @@ alpha_document_counts = {}
 # Loop through every ContentVersion record returned by the query
 for v in records:
     content_doc = v.get("ContentDocument") or {}
-    owner = content_doc.get("Owner") or {}
+    content_owner = content_doc.get("Owner") or {}
+    version_owner = v.get("Owner") or content_owner
     
-    alpha = (owner.get("Contact") or {}).get("MIDS_Alpha__c", "Unknown")
-    first_name = owner.get('FirstName', 'Unknown')
-    last_name = owner.get('LastName', 'Unknown')
+    alpha = (content_owner.get("Contact") or {}).get("MIDS_Alpha__c", "Unknown")
+    first_name = content_owner.get('FirstName', 'Unknown')
+    last_name = content_owner.get('LastName', 'Unknown')
 
     # Increment the document counter for this specific Alpha ID
     # If the Alpha isn't in the dictionary yet, it defaults to 0 and becomes 1
@@ -109,5 +168,21 @@ for v in records:
     with open(path, "wb") as f:
         f.write(resp.content)
     print("Saved", path)
+
+    # IDSWS expects PDF document images as Base64.  Preserve a null value for
+    # non-PDF downloads because their contents cannot be submitted as a PDF.
+    document = encode_pdf_document(ext, resp.content)
+
+    # Write the IDSWS metadata next to its corresponding document. Replacing
+    # the source extension keeps the document and JSON sidecar names aligned.
+    json_path = os.path.splitext(path)[0] + ".json"
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(
+            build_document_payload(content_owner, version_owner, document),
+            f,
+            indent=2,
+        )
+        f.write("\n")
+    print("Saved", json_path)
 
 print("All downloads complete.")
