@@ -7,25 +7,31 @@ from urllib.parse import quote
 import requests
 
 DOWNLOAD_FOLDER = "Downloads"
-SOURCE_NAME = "USNA - Midshipman"
+SOURCE_NAME = "US Naval Acad. Midshipman"
 
 # Optimized single SOQL query pulling directly from ContentVersion
 SOQL_QUERY = """
-SELECT ContentDocumentId, VersionData, FileExtension,
-ContentDocument.Owner.FirstName, ContentDocument.Owner.LastName,
-ContentDocument.Owner.Contact.MIDS_Alpha__c, Owner.Contact.hed__Social_Security_Number__c,
-Owner.Contact.Formatted_Birthdate__c, Owner.MiddleName
-FROM ContentVersion
-WHERE IsLatest = TRUE
-AND ContentDocument.Owner.Contact.RecordType.Name = 'Midshipmen'
-AND ContentDocument.Owner.Contact.AIS_Class_Year__c = '2030'
-AND ContentDocument.Owner.Contact.MIDS_status_code__c = '00'
-AND ContentDocumentId IN (
-SELECT ContentDocumentId
-FROM ContentDocumentLink
-WHERE LinkedEntity.Name = 'Proof of Citizenship Instructions'
-LIMIT 10
-)
+SELECT 
+    ContentDocumentId, 
+    VersionData, 
+    FileExtension,
+    ContentDocument.Owner.FirstName, 
+    ContentDocument.Owner.LastName, 
+    ContentDocument.Owner.Contact.MIDS_Alpha__c,
+    Owner.Contact.hed__Social_Security_Number__c,
+    Owner.Contact.Formatted_Birthdate__c,
+    Owner.MiddleName
+FROM ContentVersion 
+WHERE IsLatest = TRUE 
+  AND ContentDocument.Owner.Contact.RecordType.Name = 'Midshipmen' 
+  AND ContentDocument.Owner.Contact.AIS_Class_Year__c = '2030' 
+  AND ContentDocument.Owner.Contact.MIDS_status_code__c = '00'
+  AND ContentDocumentId IN (
+      SELECT ContentDocumentId 
+      FROM ContentDocumentLink 
+      WHERE LinkedEntity.Name = 'Proof of Citizenship Instructions'
+  )
+  LIMIT 10
 """
 
 def xml_escape(v):
@@ -41,8 +47,8 @@ def format_birth_date(value):
     if len(digits) != 8:
         return str(value)
 
-    # Salesforce date fields are normally returned as YYYY-MM-DD.  Support the
-    # formatted MM/DD/YYYY value currently selected by the query as well.
+    # Salesforce date fields are normally returned as YYYY-MM-DD. Support the
+    # formatted MM/DD/YYYY value selected by the query as well.
     if str(value).lstrip().startswith(("19", "20")):
         return digits
     return digits[4:] + digits[:4]
@@ -77,13 +83,23 @@ def build_document_payload(content_owner, version_owner, document):
         "source_nm": SOURCE_NAME,
         "pn_id": version_contact.get("hed__Social_Security_Number__c"),
         "pn_id_typ_cd": "S",
+        "dod_edi_pn_id": None,
         "pn_lst_nm": content_owner.get("LastName"),
         "pn_frst_nm": content_owner.get("FirstName"),
         "pn_mid_nm": version_owner.get("MiddleName"),
+        "pn_cdncy_nm": "null",
         "pn_brth_dt": format_birth_date(
             version_contact.get("Formatted_Birthdate__c")
         ),
+        "doc_typ_cd": "null",
+        "pn_doc_id": "null",
+        "pn_doc_iss_dt": "null",
+        "pn_doc_exp_dt": "null",
+        "pn_doc_st_cd": "null",
+        "pn_doc_ctry_cd": "null",
+        "pn_doc_cnty_nm": "null",
         "document": document,
+        "pn_doc_prstn_dt": "null",
     }
 
 # Load configuration data
@@ -169,12 +185,12 @@ for v in records:
         f.write(resp.content)
     print("Saved", path)
 
-    # IDSWS expects PDF document images as Base64.  Preserve a null value for
+    # IDSWS expects PDF document images as Base64. Preserve a null value for
     # non-PDF downloads because their contents cannot be submitted as a PDF.
     document = encode_pdf_document(ext, resp.content)
 
-    # Write the IDSWS metadata next to its corresponding document. Replacing
-    # the source extension keeps the document and JSON sidecar names aligned.
+    # Write metadata next to the corresponding document, retaining its base
+    # name and changing only the extension to .json.
     json_path = os.path.splitext(path)[0] + ".json"
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(
