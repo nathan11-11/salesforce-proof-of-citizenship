@@ -87,19 +87,19 @@ def build_document_payload(content_owner, version_owner, document):
         "pn_lst_nm": content_owner.get("LastName"),
         "pn_frst_nm": content_owner.get("FirstName"),
         "pn_mid_nm": version_owner.get("MiddleName"),
-        "pn_cdncy_nm": "null",
+        "pn_cdncy_nm": None,
         "pn_brth_dt": format_birth_date(
             version_contact.get("Formatted_Birthdate__c")
         ),
-        "doc_typ_cd": "null",
-        "pn_doc_id": "null",
-        "pn_doc_iss_dt": "null",
-        "pn_doc_exp_dt": "null",
-        "pn_doc_st_cd": "null",
-        "pn_doc_ctry_cd": "null",
-        "pn_doc_cnty_nm": "null",
+        "doc_typ_cd": None,
+        "pn_doc_id": None,
+        "pn_doc_iss_dt": None,
+        "pn_doc_exp_dt": None,
+        "pn_doc_st_cd": None,
+        "pn_doc_ctry_cd": None,
+        "pn_doc_cnty_nm": None,
         "document": document,
-        "pn_doc_prstn_dt": "null",
+        "pn_doc_prstn_dt": None,
     }
 
 # Load configuration data
